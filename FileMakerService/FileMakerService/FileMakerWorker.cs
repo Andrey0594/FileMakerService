@@ -13,6 +13,8 @@ using NLog.Extensions.Logging;
 using System;
 using System.Data;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -113,21 +115,18 @@ namespace FileMakerService
                         Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
                     }
-
-
-                    Dictionary<long, long> data = GetTaskAndFileID();
-                    if (data == null)
+                    Queue item = GetQueueItem();
+                    if (item == null)
                         continue;
-                    taskId = data.Keys.First();
-                    long fileID = data[taskId];
-                    string fileData = GetStringFileArray(fileID);
-
-                    List<Stamp> stamps = GetStamp(fileID);
-                    if (stamps == null)
+                    string fileData = GetStringFileArray(item.FileID);
+                    item.Stamps = GetStamp(item.FileID);
+                    if (item.Stamps == null)
                     {
                         continue;
                     }
-                    DrawStampOnFile(stamps, fileData);
+                    byte[] resultFile = DrawStampOnFile(item.Stamps, fileData);
+                    AddFile(resultFile, item.DocumentID, item.FileName + "_штамп");
+
 
 
                 }
@@ -148,16 +147,13 @@ namespace FileMakerService
             _hostApplicationLifetime.StopApplication();
         }
 
-        private Dictionary<long, long> GetTaskAndFileID()
+        private Queue GetQueueItem()
         {
             long taskID = 0;
             CallResult queue = _landocs.CallMethod("GRK_CALLING_MICROSERVICE_QUEUE",
                             "grk_sp_calling_microservice_queue_search",
                             new string[] { "pWorkerID" }, new string[] { _dbVars.WorkerId.ToString() });
             Table tbl = queue == null ? null : (Table)queue.Item;
-
-
-
             Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
             if (tbl == null || tbl.Records == null || tbl.Records.Length == 0)
             {
@@ -170,25 +166,22 @@ namespace FileMakerService
 
 
             taskID = Convert.ToInt64(tbl.GetValueFromTable(0, "ID"));
-            _logger.LogInformation($"Обработка задания с ID = {taskID}");
-
-
-
-
             string taskParams = tbl.GetValueFromTable(0, "Params").ToString();
             if (!long.TryParse(taskParams, out long fileID))
             {
                 throw new Exception("Не удалось прочитать параметры задания");
             }
-
-            return new Dictionary<long, long> { { taskID, fileID } };
+            Queue item = new Queue();
+            item.TaskID = taskID.ToString();
+            item.FileID = fileID;
+            return GetFileInfo(item);
         }
 
         private List<Stamp> GetStamp(long fileID)
         {
             ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "VERSION", fileID.ToString());
 
-            DataSet ds = _landocs.GetObjectList("STAMP", GroupAttributes.None, new string[] { "XCoord", "YCoord", "VERSION", "PageNumber", "Picture" }, constraint);
+            DataSet ds = _landocs.GetObjectList("STAMP", GroupAttributes.None, new string[] { "XCoord", "YCoord", "VERSION", "PageNumber", "Picture", "Width", "Height" }, constraint);
             if (ds == null || ds.Tables?.Count == 0 || ds.Tables[0]?.Rows?.Count == 0)
             {
                 _logger.LogInformation($"Для файла ID={fileID} штампов не найдено");
@@ -199,22 +192,27 @@ namespace FileMakerService
             foreach (DataRow item in ds.Tables[0].Rows)
             {
                 Stamp stamp = new Stamp();
-                stamp.Data = Convert.ToBase64String((byte[])item["Picture"]);
+                if (item["Picture"] is byte[])
+                    stamp.Data = Convert.ToBase64String((byte[])item["Picture"]);
+                else
+                    stamp.Data = item["Picture"].ToString();
                 stamp.X = int.Parse(item["XCoord"].ToString());
                 stamp.Y = int.Parse(item["YCoord"].ToString());
+                stamp.Width = int.Parse(item["Width"].ToString());
+                stamp.Height = int.Parse(item["Height"].ToString());
                 stamp.PageNumber = int.Parse(item["PageNumber"].ToString());
                 result.Add(stamp);
             }
             return result;
         }
 
-        private void DrawStampOnFile(List<Stamp> stamps, string fileContent)
+        private byte[] DrawStampOnFile(List<Stamp> stamps, string fileContent)
         {
             using (var handler = new HttpClientHandler())
             {
                 using (HttpClient client = new HttpClient(handler))
                 {
-                    string copyUrl = _options.ServiceOptions.PdfTool + $"/v1/pdf/insert";
+                    string url = _options.ServiceOptions.PdfTool + $"/v1/pdf/insert";
                     var data = new
                     {
                         base64Content = fileContent,
@@ -228,12 +226,17 @@ namespace FileMakerService
                                 {
                                     new{
                                         pageNumber = t.PageNumber,
-                                        scale = 0.15,
+                                        scale = 1,
                                         coordinates = new
                                         {
                                             x = t.X,
-                                            y = 297-t.Y,
-                                        } 
+                                            y = t.Y,
+                                        },
+                                        size = new
+                                        {
+                                            width=t.Width,
+                                            height=t.Height
+                                        }
                                     }
                                 }
                             }
@@ -244,10 +247,39 @@ namespace FileMakerService
                     File.WriteAllText("f:\\Сервисы интеграции\\FileMakerService\\FileMakerService\\FileMakerService\\bin\\Debug\\net6.0\\1.json", tmp);
                     var stringContent = new StringContent(tmp);
 
-
-
+                    stringContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    HttpResponseMessage response = client.PostAsync(url, stringContent).GetAwaiter().GetResult();
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                        response = client.PostAsync(url, stringContent).GetAwaiter().GetResult();
+                    }
+                    if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.OK)
+                    {
+                        ResponseStructure result = JsonConvert.DeserializeObject<ResponseStructure>(response.Content.ReadAsStringAsync().Result);
+                        return GetFileWithStamp(client, result.TaskID);
+                    }
                 }
             }
+            return null;
+        }
+
+        private byte[] GetFileWithStamp(HttpClient client, string taskID)
+        {
+            string url = _options.ServiceOptions.PdfTool + $"/v1/pdf/result?taskId={taskID}";
+            HttpResponseMessage response = client.GetAsync(url).GetAwaiter().GetResult();
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogError($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                response = client.GetAsync(url).GetAwaiter().GetResult();
+            }
+            if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.OK)
+            {
+                ResponseStructure result = JsonConvert.DeserializeObject<ResponseStructure>(response.Content.ReadAsStringAsync().Result);
+                return Convert.FromBase64String(result.ResponseContent);
+            }
+
+            return null;
         }
 
         private string GetStringFileArray(long fileID)
@@ -255,6 +287,56 @@ namespace FileMakerService
             return Convert.ToBase64String(_landocs.GetFile(fileID));
         }
 
+
+
+        private Queue GetFileInfo(Queue item)
+        {
+            ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "ID", item.FileID.ToString());
+            DataSet ds = _landocs.GetObjectList("DOCUMENTFILE", GroupAttributes.None, new string[] { "DocumentID", "Name" }, constraint);
+            if (ds == null || ds.Tables?.Count == 0 || ds?.Tables?[0]?.Rows?.Count == 0)
+            {
+                _logger.LogInformation($"Для файла ID={item.FileID} документ не найден");
+                return null;
+            }
+            item.DocumentID = long.Parse(ds?.Tables?[0].Rows?[0]["DocumentID"]?.ToString());
+            item.FileName = ds?.Tables?[0].Rows?[0]["Name"]?.ToString();
+
+            return item;
+        }
+
+
+
+
+        private void AddFile(byte[] arr, long docID, string fileName)
+        {
+            long fileID = IsExistsFile(docID, fileName);
+            long fileTypeID = GetFileType();
+
+            if (fileID==0)
+            {
+                _landocs.AddFileToDocument(docID, fileTypeID, fileName, arr);
+            }
+            else
+            {
+                _landocs.AddVersionToFile(fileID, fileTypeID, arr);
+            }
+        }
+
+        private long IsExistsFile(long docID, string fileName)
+        {
+            ConstraintComparison docConstraint = new ConstraintComparison(ComparisonOperation.EQUAL, "DocumentID", docID.ToString());
+            ConstraintComparison fileNameConstraint = new ConstraintComparison(ComparisonOperation.EQUAL, "Name", fileName);
+            ConstraintGroup groupConstraint = new ConstraintGroup(GroupOperation.AND, docConstraint, fileNameConstraint);
+            DataSet ds = _landocs.GetObjectList("DOCUMENTFILE", GroupAttributes.None, new string[] { "ID", "DocumentID", "Name" }, groupConstraint);
+            if (ds == null || ds.Tables?.Count == 0 || ds?.Tables?[0]?.Rows?.Count == 0)
+                return 0;
+            return long.Parse(ds?.Tables?[0]?.Rows?[0]?["ID"]?.ToString()??"0");
+        }
+
+        private long GetFileType()
+        {
+            return 1521;
+        }
 
     }
 
