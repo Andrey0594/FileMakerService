@@ -26,13 +26,27 @@ namespace FileMakerService
 {
     public class FileMakerWorker : BackgroundService
     {
+        /// <summary>
+        /// Логгер
+        /// </summary>
         private readonly ILogger<FileMakerWorker> _logger;
+        /// <summary>
+        ///Время жизни сервиса
+        /// </summary>
         private readonly IHostApplicationLifetime _hostApplicationLifetime;
         CancellationTokenSource tokenSource = new CancellationTokenSource();
 
-
+        /// <summary>
+        /// настройки сервиса
+        /// </summary>
         protected MainOptions _options = null;
+        /// <summary>
+        /// Коннектор ландокса
+        /// </summary>
         protected ILanDocsProvider _landocs = null;
+        /// <summary>
+        /// Сервисные переменные
+        /// </summary>
         protected DBVars _dbVars = null;
 
 
@@ -187,6 +201,12 @@ namespace FileMakerService
             _hostApplicationLifetime.StopApplication();
         }
 
+
+
+        /// <summary>
+        /// Получение очередного задания на формирование Файла Визуализации (с параметрами)
+        /// </summary>
+        /// <returns>Элемент очереди на формирование файла визуализации</returns>        
         private Queue GetQueueItem()
         {
             long taskID = 0;
@@ -217,6 +237,11 @@ namespace FileMakerService
             return GetFileInfo(item);
         }
 
+        /// <summary>
+        /// Получение штампов расположенных на файле
+        /// </summary>
+        /// <param name="fileID">ID файла, по которому будет формироваться Файл визуализации</param>
+        /// <returns>Список штампов с параметрами</returns>
         private List<Stamp> GetStamp(long fileID)
         {
             ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "VERSION", fileID.ToString());
@@ -246,6 +271,12 @@ namespace FileMakerService
             return result;
         }
 
+        /// <summary>
+        /// Формирование Файла визуализации
+        /// </summary>
+        /// <param name="stamps">Штампы</param>
+        /// <param name="fileContent">Base64 содержимое файла</param>
+        /// <returns>Массив байт сформированного Файла визуализации</returns>
         private byte[] DrawStampOnFile(List<Stamp> stamps, string fileContent)
         {
             using (var handler = new HttpClientHandler())
@@ -312,6 +343,13 @@ namespace FileMakerService
             return null;
         }
 
+
+        /// <summary>
+        /// Запрос содержимого Файла визуализации
+        /// </summary>
+        /// <param name="client">Http клиент сервиса PdfTool</param>
+        /// <param name="taskID">TaskID сформированного файла визуализации</param>
+        /// <returns>Массив байт сформированного Файла визуализации</returns>        
         private byte[] GetFileWithStamp(HttpClient client, string taskID)
         {
             string url = _options.ServiceOptions.PdfTool + $"/v1/pdf/result?taskId={taskID}";
@@ -334,10 +372,17 @@ namespace FileMakerService
             return null;
         }
 
+
+        /// <summary>
+        /// Получение base64 содержимого файла из landocs 
+        /// </summary>
+        /// <param name="fileID">ID файла из landocs</param>
+        /// <returns>base64 содержимое файла из landocs </returns>
         private string GetStringFileArray(long fileID)
         {
             return Convert.ToBase64String(_landocs.GetFile(fileID));
         }
+        
         private Queue GetFileInfo(Queue item)
         {
             ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "ID", item.FileID.ToString());
@@ -352,10 +397,17 @@ namespace FileMakerService
 
             return item;
         }
+        /// <summary>
+        /// Прикрепление файла визуализации к документу в landocs
+        /// </summary>
+        /// <param name="arr">Массив байт прикрепляемого файла</param>
+        /// <param name="docID">ID документа, к которому необходимо прикрепить файл</param>
+        /// <param name="fileName">Название прикрепляемого файла</param>
+        /// <returns>ID прикрепленного файла</returns>
         private long AddFile(byte[] arr, long docID, string fileName)
         {
             _logger.LogDebug($"Получение типа файла PDF");
-            long fileTypeID = GetFileType();
+            long fileTypeID = GetPDFFileTypeID();
             _logger.LogDebug($"Тип файла PDF={fileTypeID}");
             _logger.LogDebug($"Проверка наличия файла {fileName} в документе ID={docID}");
             long fileID = IsExistsFile(docID, fileName);
@@ -374,6 +426,12 @@ namespace FileMakerService
                 return newFileID;
             }
         }
+        /// <summary>
+        /// Проверка наличия файла в документе
+        /// </summary>
+        /// <param name="docID">ID документа</param>
+        /// <param name="fileName">Название файла</param>
+        /// <returns>0 если нет файла, ID файла если файл найден</returns>
         private long IsExistsFile(long docID, string fileName)
         {
             ConstraintComparison docConstraint = new ConstraintComparison(ComparisonOperation.EQUAL, "DocumentID", docID.ToString());
@@ -384,10 +442,22 @@ namespace FileMakerService
                 return 0;
             return long.Parse(ds?.Tables?[0]?.Rows?[0]?["ID"]?.ToString()??"0");
         }
-        private long GetFileType()
+        /// <summary>
+        /// Получение ID  типа файла PDF
+        /// </summary>
+        /// <returns>ID типа файла PDF</returns>
+        private long GetPDFFileTypeID()
         {
+            //Пока константа, так как тип файла PDF ядерный.
+            //При необходимости реализовать метод
             return 1521;
         }
+        
+        /// <summary>
+        ////Получение листа согласования по документу
+        /// </summary>
+        /// <param name="docID">ID документа</param>
+        /// <returns>Лист согласования документа</returns>
         private List<DocOperation> GetDocOperations(long docID)
         {
             List<DocOperation> docOperations = new List<DocOperation>();
@@ -408,6 +478,10 @@ namespace FileMakerService
             return docOperations;
         }
 
+        /// <summary>
+        /// Восстановление листа согласования
+        /// </summary>
+        /// <param name="docOpeations">Лист согласования до изменений</param>
         private void RestoreDocOperations(List<DocOperation> docOpeations)
         {
             foreach (DocOperation item in docOpeations)
@@ -415,6 +489,11 @@ namespace FileMakerService
                 _landocs.UpdateObject(0, item.ID, new Dictionary<string, string> { { "State", item.State.ToString() }, { "SignDate", item.SignDate } });
             }
         }
+       /// <summary>
+       /// Восстановление прав на файл (актуально для ДСП)
+       /// </summary>
+       /// <param name="oldFileID">ID файла основания для Файла визуализации</param>
+       /// <param name="newFileID">ID Файла визуализации</param>
         private void RestoreRights(long oldFileID, long newFileID)
         {
             _landocs.CallMethod("GRK_CALLING_MICROSERVICE_QUEUE", "GRK_SP_FILEMAKERSERVICE_RESTORERIGHTS", new Dictionary<string, string> { { "oldFileID", oldFileID.ToString() }, { "newFileID", newFileID.ToString() } });
