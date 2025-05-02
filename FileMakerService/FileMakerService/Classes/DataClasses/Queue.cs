@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FileMakerService.Classes
+namespace FileMakerService.Classes.DataClasses
 {
     public class Queue
     {
@@ -23,7 +23,7 @@ namespace FileMakerService.Classes
         /// <summary>
         ////ID документа
         /// </summary>
-        public long DocumentID { get;set; } = 0;
+        public long DocumentID { get; set; } = 0;
         /// <summary>
         ////Штампы
         /// </summary>

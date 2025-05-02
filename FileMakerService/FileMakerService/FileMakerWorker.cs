@@ -1,4 +1,5 @@
 using FileMakerService.Classes;
+using FileMakerService.Classes.DataClasses;
 using FileMakerService.Classes.Options;
 using LanDocs.Constraints.Operations;
 using LanDocsCustom.Standard.LanDocsConnector.Constraints;
@@ -7,6 +8,7 @@ using LanDocsCustom.Standard.LanDocsConnector.Providers;
 using LanDocsCustom.Standard.LanDocsConnector.Providers.Soap;
 using LanDocsCustom.Standard.LanDocsConnector.Providers.WebApi;
 using LanDocsCustom.Standard.LanDocsConnector.Services.BMService31;
+using Microsoft.AspNetCore.Http.Features;
 using Newtonsoft.Json;
 using NLog;
 using NLog.Extensions.Logging;
@@ -93,17 +95,11 @@ namespace FileMakerService
         public override async Task StopAsync(CancellationToken cancellationToken)
         {
             _logger.LogInformation("Потоки сервиса успешно остановлены");
-
+            tokenSource.Cancel();
         }
-
-
-
-
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             stoppingToken = tokenSource.Token;
-            int i = 0;
-
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -115,33 +111,77 @@ namespace FileMakerService
                         Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
                     }
+                    if (_options.ServiceOptions.WriteIdleLog)
+                        _logger.LogInformation("Запрос очередного задания на формирование файла визуализации");
                     Queue item = GetQueueItem();
                     if (item == null)
+                    {
+                        if (_options.ServiceOptions.WriteIdleLog)
+                            _logger.LogInformation("Заданий на формирование файла визуализации не найдено");
+                        Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
+                    }
+
+                    _logger.LogInformation($"Найдена задача на формирование файла визуализации TaskID={item.TaskID}, VersionID={item.FileID}, FileName={item.FileName}");
+
+                    _logger.LogInformation($"Скачивание файла VersionID={item.FileID}, FileName={item.FileName}");
                     string fileData = GetStringFileArray(item.FileID);
+                    _logger.LogInformation($"Файл VersionID={item.FileID}, FileName={item.FileName} скачан");
+                    _logger.LogInformation($"Получение штампов для файла VersionID={item.FileID}, FileName={item.FileName}");
                     item.Stamps = GetStamp(item.FileID);
                     if (item.Stamps == null)
                     {
+                        _logger.LogInformation($"Штампов для файла VersionID={item.FileID}, FileName={item.FileName} не найдено. Файл визуализации сформирован не будет");
+                        Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
                     }
+                    _logger.LogInformation($"Для файла VersionID={item.FileID}, FileName={item.FileName} найдено {item.Stamps.Count} штампов");
+
+                    _logger.LogInformation($"Начало формирования файла визуализации для файла VersionID={item.FileID}, FileName={item.FileName}");
                     byte[] resultFile = DrawStampOnFile(item.Stamps, fileData);
-                    AddFile(resultFile, item.DocumentID, item.FileName + "_штамп");
+                    if(resultFile==null)
+                    {
+                        _logger.LogInformation($"Ошибка формирования файла визуализации для файла VersionID={item.FileID}, FileName={item.FileName}");
+                        Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod); 
+                        continue;
+                    }
 
 
+                    List<DocOperation> operations = new List<DocOperation>();
+                    if(_options.ServiceOptions.RestoreDocOperations)
+                    {
+                        _logger.LogInformation($"Сохранение листа согласования");
+                        operations = GetDocOperations(item.DocumentID);
+                        _logger.LogInformation($"Лист согласования сохранен");
+                        _logger.LogDebug($"Имеющийся лист согласования");
+                        foreach (DocOperation operation in operations)
+                        {
+                            _logger.LogDebug($" ID={operation.ID}\n State={operation.State}\n SignDate={operation.SignDate}");
+                        }
+                    }
+                    _logger.LogInformation($"Прикрепление файла FileName={item.FileName + "_штамп"} к документу ID={item.DocumentID}");
+                    long newFileID=AddFile(resultFile, item.DocumentID, item.FileName + "_штамп");
+                    _logger.LogInformation($"Файл FileName={item.FileName + "_штамп"} прикреплен к документу ID={item.DocumentID}. ID добавленного файла={newFileID}");
+
+                    if (_options.ServiceOptions.RestoreDocOperations && operations!=null && operations?.Count>0)
+                    {
+                        _logger.LogInformation($"Восстановление листа согласования");
+                        RestoreDocOperations(operations);
+                        _logger.LogInformation($"Лист согласования восстановлен");
+                    }
+                    if(_options.ServiceOptions.RestoreRights)
+                    {
+                        _logger.LogInformation($"Восстановление прав на файл ID={newFileID}");
+                        RestoreRights(item.FileID,newFileID);
+                        _logger.LogInformation($"Права на файл ID={newFileID} восстановлены");
+                    }
+                    Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
 
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-
-                    throw;
+                    _logger.LogError($"Ошибка:{ex.Message}");                    
                 }
-
-
-
-
-
-
-
             }
             tokenSource.Cancel();
             _hostApplicationLifetime.StopApplication();
@@ -184,10 +224,10 @@ namespace FileMakerService
             DataSet ds = _landocs.GetObjectList("STAMP", GroupAttributes.None, new string[] { "XCoord", "YCoord", "VERSION", "PageNumber", "Picture", "Width", "Height" }, constraint);
             if (ds == null || ds.Tables?.Count == 0 || ds.Tables[0]?.Rows?.Count == 0)
             {
-                _logger.LogInformation($"Для файла ID={fileID} штампов не найдено");
+                _logger.LogDebug($"Для файла ID={fileID} штампов не найдено");
                 return null;
             }
-            _logger.LogInformation($"Для файла ID={fileID} найдено штампов - {ds.Tables[0].Rows.Count}");
+            _logger.LogDebug($"Для файла ID={fileID} найдено штампов - {ds.Tables[0].Rows.Count}");
             List<Stamp> result = new List<Stamp>();
             foreach (DataRow item in ds.Tables[0].Rows)
             {
@@ -244,21 +284,29 @@ namespace FileMakerService
                     ).ToArray()
                     };
                     string tmp = JsonConvert.SerializeObject(data);
-                    File.WriteAllText("f:\\Сервисы интеграции\\FileMakerService\\FileMakerService\\FileMakerService\\bin\\Debug\\net6.0\\1.json", tmp);
                     var stringContent = new StringContent(tmp);
+                    _logger.LogDebug($"Тело запроса на вставку штампа в документ PDF={tmp}");
 
                     stringContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
                     HttpResponseMessage response = client.PostAsync(url, stringContent).GetAwaiter().GetResult();
                     if (!response.IsSuccessStatusCode)
                     {
-                        _logger.LogError($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                        _logger.LogDebug($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
                         response = client.PostAsync(url, stringContent).GetAwaiter().GetResult();
                     }
                     if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.OK)
                     {
                         ResponseStructure result = JsonConvert.DeserializeObject<ResponseStructure>(response.Content.ReadAsStringAsync().Result);
                         return GetFileWithStamp(client, result.TaskID);
+
                     }
+                    else
+                    {
+                        _logger.LogError($"Ошибка при простановке штампа: {response.StatusCode}. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                        throw new Exception($"Ошибка при простановке штампа: {response.StatusCode}. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                        
+                    }
+
                 }
             }
             return null;
@@ -270,13 +318,17 @@ namespace FileMakerService
             HttpResponseMessage response = client.GetAsync(url).GetAwaiter().GetResult();
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogError($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
+                _logger.LogDebug($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
                 response = client.GetAsync(url).GetAwaiter().GetResult();
             }
             if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.OK)
             {
                 ResponseStructure result = JsonConvert.DeserializeObject<ResponseStructure>(response.Content.ReadAsStringAsync().Result);
                 return Convert.FromBase64String(result.ResponseContent);
+            }
+            else
+            {
+                throw new Exception($"Ошибка при простановке штампа: {response.StatusCode} Повторяю попытку. ResponseContent: {response.Content.ReadAsStringAsync().Result}");
             }
 
             return null;
@@ -286,16 +338,13 @@ namespace FileMakerService
         {
             return Convert.ToBase64String(_landocs.GetFile(fileID));
         }
-
-
-
         private Queue GetFileInfo(Queue item)
         {
             ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "ID", item.FileID.ToString());
             DataSet ds = _landocs.GetObjectList("DOCUMENTFILE", GroupAttributes.None, new string[] { "DocumentID", "Name" }, constraint);
             if (ds == null || ds.Tables?.Count == 0 || ds?.Tables?[0]?.Rows?.Count == 0)
             {
-                _logger.LogInformation($"Для файла ID={item.FileID} документ не найден");
+                _logger.LogDebug($"Для файла ID={item.FileID} документ не найден");
                 return null;
             }
             item.DocumentID = long.Parse(ds?.Tables?[0].Rows?[0]["DocumentID"]?.ToString());
@@ -303,25 +352,28 @@ namespace FileMakerService
 
             return item;
         }
-
-
-
-
-        private void AddFile(byte[] arr, long docID, string fileName)
+        private long AddFile(byte[] arr, long docID, string fileName)
         {
-            long fileID = IsExistsFile(docID, fileName);
+            _logger.LogDebug($"Получение типа файла PDF");
             long fileTypeID = GetFileType();
-
+            _logger.LogDebug($"Тип файла PDF={fileTypeID}");
+            _logger.LogDebug($"Проверка наличия файла {fileName} в документе ID={docID}");
+            long fileID = IsExistsFile(docID, fileName);
             if (fileID==0)
             {
-                _landocs.AddFileToDocument(docID, fileTypeID, fileName, arr);
+                _logger.LogDebug($"Файл {fileName} в документе ID={docID} не найден. Создается новый файл");
+                long newFileID= _landocs.AddFileToDocument(docID, fileTypeID, fileName, arr);
+                _logger.LogDebug($"Файл {fileName} создан ID={newFileID}");
+                return newFileID;
             }
             else
             {
-                _landocs.AddVersionToFile(fileID, fileTypeID, arr);
+                _logger.LogDebug($"Файл {fileName} в документе ID={docID} найден ID={fileID}. Создается новая версия файла");
+                long newFileID = _landocs.AddVersionToFile(fileID, fileTypeID, arr);
+                _logger.LogDebug($"Новая версия файла {fileName} создана ID={newFileID}");
+                return newFileID;
             }
         }
-
         private long IsExistsFile(long docID, string fileName)
         {
             ConstraintComparison docConstraint = new ConstraintComparison(ComparisonOperation.EQUAL, "DocumentID", docID.ToString());
@@ -332,12 +384,41 @@ namespace FileMakerService
                 return 0;
             return long.Parse(ds?.Tables?[0]?.Rows?[0]?["ID"]?.ToString()??"0");
         }
-
         private long GetFileType()
         {
             return 1521;
         }
+        private List<DocOperation> GetDocOperations(long docID)
+        {
+            List<DocOperation> docOperations = new List<DocOperation>();
+            ConstraintComparison constraint = new ConstraintComparison(ComparisonOperation.EQUAL, "DocID", docID.ToString());
+            DataSet ds = _landocs.GetObjectList("DOCOPERATION", GroupAttributes.None, new string[] { "ID", "State", "SignDate" },constraint);
+            if (ds == null || ds.Tables?.Count == 0 || ds?.Tables?[0]?.Rows?.Count == 0)
+                return null;
+            foreach (DataRow row in ds.Tables[0].Rows)
+            {
+                DocOperation item = new DocOperation
+                {
+                    ID = long.Parse(row["ID"].ToString() ?? "0"),
+                    State = int.Parse(row["State"].ToString() ?? "0"),
+                    SignDate = row["SignDate"].ToString() ?? ""
+                };
+                docOperations.Add(item);
+            }
+            return docOperations;
+        }
 
+        private void RestoreDocOperations(List<DocOperation> docOpeations)
+        {
+            foreach (DocOperation item in docOpeations)
+            {
+                _landocs.UpdateObject(0, item.ID, new Dictionary<string, string> { { "State", item.State.ToString() }, { "SignDate", item.SignDate } });
+            }
+        }
+        private void RestoreRights(long oldFileID, long newFileID)
+        {
+            _landocs.CallMethod("GRK_CALLING_MICROSERVICE_QUEUE", "GRK_SP_FILEMAKERSERVICE_RESTORERIGHTS", new Dictionary<string, string> { { "oldFileID", oldFileID.ToString() }, { "newFileID", newFileID.ToString() } });
+        }
     }
 
 }

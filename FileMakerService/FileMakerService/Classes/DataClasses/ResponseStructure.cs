@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FileMakerService.Classes
+namespace FileMakerService.Classes.DataClasses
 {
-    public  class ResponseStructure
+    public class ResponseStructure
     {
         /// <summary>
         /// ID задания

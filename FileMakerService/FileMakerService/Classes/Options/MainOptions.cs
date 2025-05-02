@@ -33,7 +33,7 @@ namespace FileMakerService.Classes.Options
                 LanDocsConnectionOptions = new LanDocsConnectionOptions
                 {
                     // Типы подключения по умолчанию
-                    ConnectionType = LanDocsConnectionType.SOAP,
+                    ConnectionType = LanDocsConnectionType.WebAPI,
 
                     // Параметры подключения к BMService31
                     SoapConnectionOptions = new SoapConnectionOptions
@@ -82,9 +82,11 @@ namespace FileMakerService.Classes.Options
 
             // Параметры сервиса
 
-            options.ServiceOptions = new ServiceOptions();
-            options.ServiceOptions.TempFolder = Path.Combine(AppContext.BaseDirectory, "temp");
-            options.ServiceOptions.PdfTool = "http://172.19.90.183:7777";
+            options.ServiceOptions = new ServiceOptions();            
+            options.ServiceOptions.PdfTool = "http://localhost:7010";
+            options.ServiceOptions.RestoreDocOperations = true;
+            options.ServiceOptions.RestoreRights = true;
+            options.ServiceOptions.QueueCheckPeriodSec = 1;
 
             OptionsLoader<MainOptions>.SaveOptionsToJson(options);
             return options;

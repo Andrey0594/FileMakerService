@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace FileMakerService.Classes
+namespace FileMakerService.Classes.DataClasses
 {
     public class Stamp
     {
@@ -23,7 +23,7 @@ namespace FileMakerService.Classes
         /// <summary>
         ////Координата Y
         /// </summary>
-        public int Y { get; set; }     
+        public int Y { get; set; }
         /// <summary>
         ////Ширина штампа
         /// </summary>

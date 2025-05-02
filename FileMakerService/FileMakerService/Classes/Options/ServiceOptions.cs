@@ -13,21 +13,28 @@ namespace FileMakerService.Classes.Options
         ///Период проверки наличия элементов в очереди
         /// </summary>
         public int QueueCheckPeriodSec { get; set; }
-
-        /// <summary>
-        ///Восстанавливать лист согласования после добавления файла визуализации
-        /// </summary>
-        public bool RestoreDocOperation { get; set; }
+        
 
         /// <summary>
         /// URL к сервису PdfTool
         /// </summary>
         public string PdfTool { get; set; }
 
+        
         /// <summary>
-        ///Папка для сохранения временных файлов
+        ////Необходимость восстанавливать лист согласования
         /// </summary>
-        public string TempFolder { get; set; }
+        public bool RestoreDocOperations { get; set; }
+
+        /// <summary>
+        ////Необходимость восстанавливать права(актуально для документов с уровнем доступа ДСП)
+        /// </summary>
+        public bool RestoreRights { get; set; }
+
+        /// <summary>
+        ////Необходимость писать в лог информации об отсутствии заданий
+        /// </summary>
+        public bool WriteIdleLog { get; set; }
 
         // internals
         internal int QueueCheckPeriod { get { return QueueCheckPeriodSec < 60 ? QueueCheckPeriodSec * 1000 : 60000; } }
