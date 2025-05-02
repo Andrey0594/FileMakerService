@@ -19,6 +19,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using static System.Formats.Asn1.AsnWriter;
 
@@ -116,9 +117,9 @@ namespace FileMakerService
             stoppingToken = tokenSource.Token;
             while (!stoppingToken.IsCancellationRequested)
             {
+                long taskID = 0;
                 try
                 {
-                    long taskId = 0;
                     if (!_landocs.Connect())
                     {
                         _logger.LogError($"Нет подключения к LanDocs");
@@ -135,6 +136,7 @@ namespace FileMakerService
                         Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
                     }
+                    taskID = long.Parse(item.TaskID);
 
                     _logger.LogInformation($"Найдена задача на формирование файла визуализации TaskID={item.TaskID}, VersionID={item.FileID}, FileName={item.FileName}");
 
@@ -146,6 +148,7 @@ namespace FileMakerService
                     if (item.Stamps == null)
                     {
                         _logger.LogInformation($"Штампов для файла VersionID={item.FileID}, FileName={item.FileName} не найдено. Файл визуализации сформирован не будет");
+                        ChangeTaskState(taskID, "SUCCESS", "EndDatetime", $"Штампов для файла VersionID={item.FileID}, FileName={item.FileName} не найдено. Файл визуализации сформирован не будет");
                         Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
                         continue;
                     }
@@ -155,9 +158,8 @@ namespace FileMakerService
                     byte[] resultFile = DrawStampOnFile(item.Stamps, fileData);
                     if(resultFile==null)
                     {
-                        _logger.LogInformation($"Ошибка формирования файла визуализации для файла VersionID={item.FileID}, FileName={item.FileName}");
-                        Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod); 
-                        continue;
+                        _logger.LogError($"Ошибка формирования файла визуализации для файла VersionID={item.FileID}, FileName={item.FileName}");
+                        throw new Exception($"Ошибка формирования файла визуализации для файла VersionID={item.FileID}, FileName={item.FileName}");                       
                     }
 
 
@@ -188,13 +190,18 @@ namespace FileMakerService
                         _logger.LogInformation($"Восстановление прав на файл ID={newFileID}");
                         RestoreRights(item.FileID,newFileID);
                         _logger.LogInformation($"Права на файл ID={newFileID} восстановлены");
-                    }
+                    }                   
+                    ChangeTaskState(taskID, "SUCCESS", "EndDatetime", $"Для файла ID={item.FileID} сформирован файл визуализации ID={newFileID}");
+                    
                     Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
 
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Ошибка:{ex.Message}");                    
+                    _logger.LogError($"Ошибка:{ex.Message}");
+                    ChangeTaskState(taskID, "ERROR", "EndDatetime", "Ошибка формирования файла визуализации: "+ex.Message);
+                    Thread.Sleep(_options.ServiceOptions.QueueCheckPeriod);
+                    continue;
                 }
             }
             tokenSource.Cancel();
@@ -229,6 +236,7 @@ namespace FileMakerService
             string taskParams = tbl.GetValueFromTable(0, "Params").ToString();
             if (!long.TryParse(taskParams, out long fileID))
             {
+                ChangeTaskState(taskID, "ERROR", "EndDatetime", $"Ошибка: Не удалось прочитать параметры задания");
                 throw new Exception("Не удалось прочитать параметры задания");
             }
             Queue item = new Queue();
@@ -497,6 +505,36 @@ namespace FileMakerService
         private void RestoreRights(long oldFileID, long newFileID)
         {
             _landocs.CallMethod("GRK_CALLING_MICROSERVICE_QUEUE", "GRK_SP_FILEMAKERSERVICE_RESTORERIGHTS", new Dictionary<string, string> { { "oldFileID", oldFileID.ToString() }, { "newFileID", newFileID.ToString() } });
+        }
+
+        private void ChangeTaskState(long taskId, string stateName, string dateTimeFieldName, string resultMessage = "")
+        {
+            if (taskId == 0) return;
+
+            try
+            {
+                _logger.LogDebug($"Перевод состояния задания с ID = {taskId} в {stateName}");
+                _landocs.UpdateObjectWithType(0, "GRK_CALLING_MICROSERVICE_QUEUE",
+                new string[] {
+                                "STATE",
+                                dateTimeFieldName,//"EndDatetime",
+                                "Result"
+                },
+                new string[] {
+                                _dbVars.QueueState.GetStateByName(stateName).ToString(),
+                                DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                                resultMessage
+                },
+                new string[] { "ID" },
+                new string[] { taskId.ToString() });
+                _logger.LogDebug($"Задание с ID = {taskId} переведено в {stateName}");
+            }
+            catch
+            {
+                // подавление ошибки, мы просто пытаемся сменить состояние
+                // если не получилось - ну и ладно, что ж поделаешь...
+                _logger.LogError($"Ошибка смены состояния задания с ID = {taskId}");
+            }
         }
     }
 
